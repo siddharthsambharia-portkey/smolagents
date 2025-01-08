@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
 import litellm
+from portkey_ai import Portkey
 import torch
 from huggingface_hub import InferenceClient
 from transformers import (
@@ -485,6 +486,107 @@ class LiteLLMModel(Model):
         self.last_output_token_count = response.usage.completion_tokens
         arguments = json.loads(tool_calls.function.arguments)
         return tool_calls.function.name, arguments, tool_calls.id
+
+class PortkeyModel(Model):
+    """A class to interact with Hugging Face's Inference API for language model interaction.
+
+    This engine allows you to communicate with Hugging Face's models using the Inference API. It can be used in both serverless mode or with a dedicated endpoint, supporting features like stop sequences and grammar customization.
+
+    Parameters:
+        model_id (`str`, *optional*, defaults to `"Qwen/Qwen2.5-Coder-32B-Instruct"`):
+            The Hugging Face model ID to be used for inference. This can be a path or model identifier from the Hugging Face model hub.
+        token (`str`, *optional*):
+            Token used by the Hugging Face API for authentication. This token need to be authorized 'Make calls to the serverless Inference API'.
+            If the model is gated (like Llama-3 models), the token also needs 'Read access to contents of all public gated repos you can access'.
+            If not provided, the class will try to use environment variable 'HF_TOKEN', else use the token stored in the Hugging Face CLI configuration.
+        timeout (`int`, *optional*, defaults to 120):
+            Timeout for the API request, in seconds.
+
+    Raises:
+        ValueError:
+            If the model name is not provided.
+
+    Example:
+    ```python
+    >>> engine = HfApiModel(
+    ...     model_id="Qwen/Qwen2.5-Coder-32B-Instruct",
+    ...     token="your_hf_token_here",
+    ... )
+    >>> messages = [{"role": "user", "content": "Explain quantum mechanics in simple terms."}]
+    >>> response = engine(messages, stop_sequences=["END"], max_tokens=1500)
+    >>> print(response)
+    "Quantum mechanics is the branch of physics that studies..."
+    ```
+    """
+
+    def __init__(
+        self,
+        model="gpt-4o",
+        api_base=None,
+        api_key=None,
+        virtual_key = None,
+        config = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.api_base = api_base
+        self.api_key = api_key
+        self.virtual_key = virtual_key
+        self.config = config
+        self.model_id = model
+        self.kwargs = kwargs
+        self.client = Portkey(model=self.model_id, virtual_key=virtual_key, **kwargs)
+
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        stop_sequences: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        max_tokens: int = 1500,
+    ) -> str:
+        """Generates a text completion for the given message list"""
+        messages = get_clean_message_list(
+            messages, role_conversions=tool_role_conversions
+        )
+
+        # Send messages to the Hugging Face Inference API
+        if grammar is not None:
+            output = self.client.chat_completion(
+                messages,
+                stop=stop_sequences,
+                response_format=grammar,
+                max_tokens=max_tokens,
+            )
+        else:
+            output = self.client.chat.completions.create(
+                messages, stop=stop_sequences, max_tokens=max_tokens
+            )
+
+        response = output.choices[0].message.content
+        self.last_input_token_count = output.usage.prompt_tokens
+        self.last_output_token_count = output.usage.completion_tokens
+        return response
+
+    def get_tool_call(
+        self,
+        messages: List[Dict[str, str]],
+        available_tools: List[Tool],
+        stop_sequences,
+    ):
+        """Generates a tool call for the given message list. This method is used only by `ToolCallingAgent`."""
+        messages = get_clean_message_list(
+            messages, role_conversions=tool_role_conversions
+        )
+        response = self.client.chat.completions.create(
+            messages=messages,
+            tools=[get_json_schema(tool) for tool in available_tools],
+            tool_choice="auto",
+            stop=stop_sequences,
+        )
+        tool_call = response.choices[0].message.tool_calls[0]
+        self.last_input_token_count = response.usage.prompt_tokens
+        self.last_output_token_count = response.usage.completion_tokens
+        return tool_call.function.name, tool_call.function.arguments, tool_call.id
 
 
 __all__ = [
