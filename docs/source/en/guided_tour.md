@@ -26,6 +26,7 @@ To initialize a minimal agent, you need at least these two arguments:
 - `model`, a text-generation model to power your agent - because the agent is different from a simple LLM, it is a system that uses a LLM as its engine. You can use any of these options:
     - [`TransformersModel`] takes a pre-initialized `transformers` pipeline to run inference on your local machine using `transformers`.
     - [`HfApiModel`] leverages a `huggingface_hub.InferenceClient` under the hood.
+    - [`PortkeyModel`] lets you call 250+ different models through [Portkey's AI Gateway](https://docs.portkey.ai/) with built-in observability, fallbacks, routing, and logging!
     - [`LiteLLMModel`] lets you call 100+ different models through [LiteLLM](https://docs.litellm.ai/)!
 
 - `tools`, A list of `Tools` that the agent can use to solve the task. It can be an empty list. You can also add the default toolbox on top of your `tools` list by defining the optional argument `add_base_tools=True`.
@@ -67,6 +68,28 @@ agent.run(
 )
 ```
 </hfoption>
+
+<hfoption id="Portkey">
+
+To use `PortkeyModel`, you need to set up your Portkey API key and either a config ID or virtual key. Portkey AI Gateway simplifies access to 250+ LLM models across providers (OpenAI, Anthropic, Azure, Ollama etc.) without managing multiple API keys or implementations. It provides built-in observability, fallbacks, load balancing, and cost optimization through a single unified API. You can use pre-built configs or create custom routing rules to handle model redundancy and fallbacks.
+
+```python
+from smolagents import CodeAgent, PortkeyModel
+
+model = PortkeyModel(
+    model_id="gpt-4",  # The model you want to use
+    api_key="your-portkey-api-key",
+    virtual_key="your-llm-virtual-key"  # Either config ID or virtual_key is required
+)
+agent = CodeAgent(tools=[], model=model, add_base_tools=True)
+
+agent.run(
+    "Could you give me the 118th number in the Fibonacci sequence?",
+)
+```
+</hfoption>
+
+
 <hfoption id="OpenAI or Anthropic API">
 
 To use `LiteLLMModel`, you need to set the environment variable `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, or pass `api_key` variable upon initialization.
