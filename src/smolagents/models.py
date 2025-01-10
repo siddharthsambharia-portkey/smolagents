@@ -514,12 +514,12 @@ class PortkeyModel(Model):
             
     Note:
         -It is recommended to use either config or virtual_key must be provided along with api_key if you are using the hosted version of AI Gateway
-    
+        -The OpenSource AI GAteway can be used by passing api_base in the model client
     Example:
         >>> model = PortkeyModel(
         ...     api_key="your-api-key",
         ...     virtual_key="llm-virtual-key",
-        ...     model_id="gpt-4"
+        ...     model_id="gpt-4",
         ... )
         >>> messages = [{"role": "user", "content": "Hello!"}]
         >>> response = model(messages)
@@ -548,6 +548,7 @@ class PortkeyModel(Model):
             api_key=self.api_key,
             virtual_key=self.virtual_key,
             config=self.config,
+            base_url=self.api_base,
             **kwargs)
 
     def generate(
