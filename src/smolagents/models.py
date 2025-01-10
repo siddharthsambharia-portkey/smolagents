@@ -31,6 +31,8 @@ from transformers import (
     StoppingCriteriaList,
 )
 import openai
+from portkey_ai import Portkey
+
 
 from .tools import Tool
 from .utils import parse_json_tool_call
@@ -599,6 +601,114 @@ class OpenAIServerModel(Model):
         return tool_calls.function.name, arguments, tool_calls.id
 
 
+class PortkeyModel(Model):
+    """A class to interact with Portkey's AI Gateway service, providing a unified interface for LLM interactions.
+    
+    Portkey's AI Gateway offers:
+    - Multi-provider LLM support (OpenAI, Anthropic, etc.)
+    - Request routing and load balancing
+    - Fallback handling and redundancy
+    - Usage tracking and monitoring
+    - Cost optimization
+    - Caching capabilities
+    
+    Parameters:
+        model_id (`str`, *optional*):
+            Model identifier for the LLM to use (e.g., "gpt-4", "claude-2")
+        api_key (`str`):
+            Your Portkey API key for authentication
+        config (`str` or `dict`, *optional*):
+            Either a config ID (e.g., "pc-***") or a configuration dictionary
+        virtual_key (`str`, *optional*):
+            Virtual key for authentication, can be used instead of or with config
+        **kwargs:
+            Additional arguments passed to the Portkey client
+            
+    Note:
+        -It is recommended to use either config or virtual_key must be provided along with api_key if you are using the hosted version of AI Gateway
+    
+    Example:
+        >>> model = PortkeyModel(
+        ...     api_key="your-api-key",
+        ...     virtual_key="llm-virtual-key",
+        ...     model_id="gpt-4"
+        ... )
+        >>> messages = [{"role": "user", "content": "Hello!"}]
+        >>> response = model(messages)
+    """
+
+
+    
+
+    def __init__(
+        self,
+        model_id=None,
+        api_base=None,
+        api_key=None,
+        virtual_key = None,
+        config = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.api_base = api_base
+        self.api_key = api_key
+        self.virtual_key = virtual_key
+        self.config = config
+        self.model_id = model_id
+        self.kwargs = kwargs
+        self.client = Portkey(
+            api_key=self.api_key,
+            virtual_key=self.virtual_key,
+            config=self.config,
+            base_url=self.api_base,
+            **kwargs)
+
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        stop_sequences: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        max_tokens: int = 1500,
+    ) -> str:
+        """Generates a text completion for the given message list"""
+        messages = get_clean_message_list(
+            messages, role_conversions=tool_role_conversions
+        )
+            
+        output = self.client.chat.completions.create(
+            model=self.model_id, 
+            messages=messages, 
+            stop=stop_sequences, 
+            max_tokens=max_tokens
+        )
+
+        response = output.choices[0].message.content
+        self.last_input_token_count = output.usage.prompt_tokens
+        self.last_output_token_count = output.usage.completion_tokens
+        return response
+    
+    def get_tool_call(
+        self,
+        messages: List[Dict[str, str]],
+        available_tools: List[Tool],
+        stop_sequences,
+    ):
+        """Generates a tool call for the given message list. This method is used only by `ToolCallingAgent`."""
+        messages = get_clean_message_list(
+            messages, role_conversions=tool_role_conversions
+        )
+        response = self.client.chat.completions.create(
+            messages=messages,
+            tools=[get_json_schema(tool) for tool in available_tools],
+            tool_choice="auto",
+            stop=stop_sequences,
+        )
+        tool_call = response.choices[0].message.tool_calls[0]
+        self.last_input_token_count = response.usage.prompt_tokens
+        self.last_output_token_count = response.usage.completion_tokens
+        return tool_call.function.name, tool_call.function.arguments, tool_call.id
+
+
 __all__ = [
     "MessageRole",
     "tool_role_conversions",
@@ -608,4 +718,6 @@ __all__ = [
     "HfApiModel",
     "LiteLLMModel",
     "OpenAIServerModel",
+    "PortkeyModel"
 ]
+
