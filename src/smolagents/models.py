@@ -17,12 +17,11 @@
 import json
 import logging
 import os
+import random
 from copy import deepcopy
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
-import litellm
-from portkey_ai import Portkey
 import torch
 from huggingface_hub import InferenceClient
 from transformers import (
@@ -31,6 +30,9 @@ from transformers import (
     StoppingCriteria,
     StoppingCriteriaList,
 )
+import openai
+from portkey_ai import Portkey
+
 
 from .tools import Tool
 from .utils import parse_json_tool_call
@@ -39,13 +41,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_JSONAGENT_REGEX_GRAMMAR = {
     "type": "regex",
-    "value": 'Thought: .+?\\nAction:\\n\\{\\n\\s{4}"action":\\s"[^"\\n]+",\\n\\s{4}"action_input":\\s"[^"\\n]+"\\n\\}\\n<end_action>',
+    "value": 'Thought: .+?\\nAction:\\n\\{\\n\\s{4}"action":\\s"[^"\\n]+",\\n\\s{4}"action_input":\\s"[^"\\n]+"\\n\\}\\n<end_code>',
 }
 
 DEFAULT_CODEAGENT_REGEX_GRAMMAR = {
     "type": "regex",
-    "value": "Thought: .+?\\nCode:\\n```(?:py|python)?\\n(?:.|\\s)+?\\n```<end_action>",
+    "value": "Thought: .+?\\nCode:\\n```(?:py|python)?\\n(?:.|\\s)+?\\n```<end_code>",
 }
+
+try:
+    import litellm
+
+    is_litellm_available = True
+except ImportError:
+    is_litellm_available = False
 
 
 class MessageRole(str, Enum):
@@ -150,6 +159,14 @@ class Model:
     ):
         raise NotImplementedError
 
+    def get_tool_call(
+        self,
+        messages: List[Dict[str, str]],
+        available_tools: List[Tool],
+        stop_sequences,
+    ):
+        raise NotImplementedError
+
     def __call__(
         self,
         messages: List[Dict[str, str]],
@@ -240,7 +257,6 @@ class HfApiModel(Model):
 
         # Send messages to the Hugging Face Inference API
         if grammar is not None:
-            print(self.client)
             output = self.client.chat_completion(
                 messages,
                 stop=stop_sequences,
@@ -248,7 +264,6 @@ class HfApiModel(Model):
                 max_tokens=max_tokens,
             )
         else:
-            
             output = self.client.chat.completions.create(
                 messages, stop=stop_sequences, max_tokens=max_tokens
             )
@@ -281,7 +296,6 @@ class HfApiModel(Model):
 
 
 class TransformersModel(Model):
-    
     """This engine initializes a model and tokenizer from the given `model_id`.
 
     Parameters:
@@ -430,6 +444,10 @@ class LiteLLMModel(Model):
         api_key=None,
         **kwargs,
     ):
+        if not is_litellm_available:
+            raise ImportError(
+                "litellm not found. Install it with `pip install litellm`"
+            )
         super().__init__()
         self.model_id = model_id
         # IMPORTANT - Set this to TRUE to add the function to the prompt for Non OpenAI LLMs
@@ -489,6 +507,100 @@ class LiteLLMModel(Model):
         arguments = json.loads(tool_calls.function.arguments)
         return tool_calls.function.name, arguments, tool_calls.id
 
+
+class OpenAIServerModel(Model):
+    """This engine connects to an OpenAI-compatible API server.
+
+    Parameters:
+        model_id (`str`):
+            The model identifier to use on the server (e.g. "gpt-3.5-turbo").
+        api_base (`str`):
+            The base URL of the OpenAI-compatible API server.
+        api_key (`str`):
+            The API key to use for authentication.
+        temperature (`float`, *optional*, defaults to 0.7):
+            Controls randomness in the model's responses. Values between 0 and 2.
+        **kwargs:
+            Additional keyword arguments to pass to the OpenAI API.
+    """
+
+    def __init__(
+        self,
+        model_id: str,
+        api_base: str,
+        api_key: str,
+        temperature: float = 0.7,
+        **kwargs,
+    ):
+        super().__init__()
+        self.model_id = model_id
+        self.client = openai.OpenAI(
+            base_url=api_base,
+            api_key=api_key,
+        )
+        self.temperature = temperature
+        self.kwargs = kwargs
+
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        stop_sequences: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        max_tokens: int = 1500,
+    ) -> str:
+        """Generates a text completion for the given message list"""
+        messages = get_clean_message_list(
+            messages, role_conversions=tool_role_conversions
+        )
+
+        response = self.client.chat.completions.create(
+            model=self.model_id,
+            messages=messages,
+            stop=stop_sequences,
+            max_tokens=max_tokens,
+            temperature=self.temperature,
+            **self.kwargs,
+        )
+
+        self.last_input_token_count = response.usage.prompt_tokens
+        self.last_output_token_count = response.usage.completion_tokens
+        return response.choices[0].message.content
+
+    def get_tool_call(
+        self,
+        messages: List[Dict[str, str]],
+        available_tools: List[Tool],
+        stop_sequences: Optional[List[str]] = None,
+        max_tokens: int = 500,
+    ) -> Tuple[str, Union[str, Dict], str]:
+        """Generates a tool call for the given message list"""
+        messages = get_clean_message_list(
+            messages, role_conversions=tool_role_conversions
+        )
+
+        response = self.client.chat.completions.create(
+            model=self.model_id,
+            messages=messages,
+            tools=[get_json_schema(tool) for tool in available_tools],
+            tool_choice="auto",
+            stop=stop_sequences,
+            max_tokens=max_tokens,
+            temperature=self.temperature,
+            **self.kwargs,
+        )
+
+        tool_calls = response.choices[0].message.tool_calls[0]
+        self.last_input_token_count = response.usage.prompt_tokens
+        self.last_output_token_count = response.usage.completion_tokens
+
+        try:
+            arguments = json.loads(tool_calls.function.arguments)
+        except json.JSONDecodeError:
+            arguments = tool_calls.function.arguments
+
+        return tool_calls.function.name, arguments, tool_calls.id
+
+
 class PortkeyModel(Model):
     """A class to interact with Portkey's AI Gateway service, providing a unified interface for LLM interactions.
     
@@ -514,12 +626,12 @@ class PortkeyModel(Model):
             
     Note:
         -It is recommended to use either config or virtual_key must be provided along with api_key if you are using the hosted version of AI Gateway
-        -The OpenSource AI GAteway can be used by passing api_base in the model client
+    
     Example:
         >>> model = PortkeyModel(
         ...     api_key="your-api-key",
         ...     virtual_key="llm-virtual-key",
-        ...     model_id="gpt-4",
+        ...     model_id="gpt-4"
         ... )
         >>> messages = [{"role": "user", "content": "Hello!"}]
         >>> response = model(messages)
@@ -605,5 +717,7 @@ __all__ = [
     "TransformersModel",
     "HfApiModel",
     "LiteLLMModel",
+    "OpenAIServerModel",
     "PortkeyModel"
 ]
+
